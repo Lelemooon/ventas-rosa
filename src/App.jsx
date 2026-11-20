@@ -192,7 +192,7 @@ export default function App() {
   };
 
   const motivationalPhrases = [
-    "¡Tú puedes, Rosa! 🌸",
+    "¡Tú puedes, mami! 🌸",
     "¡Qué bonitas prendas! 👗",
     "¡A vender mucho hoy! 💖",
     "¡Eres la mejor! ✨",
@@ -212,7 +212,7 @@ export default function App() {
           onClick={() => showToast(motivationalPhrases[Math.floor(Math.random() * motivationalPhrases.length)])}
         >
           <MascotRose size={34} className="hover:rotate-12 transition-transform" />
-          <h1 className="text-xl font-black text-[#9F1239] tracking-tight">Ventas de Rosa</h1>
+          <h1 className="text-xl font-black text-[#9F1239] tracking-tight">Ventas</h1>
         </div>
       </header>
 
