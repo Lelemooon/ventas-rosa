@@ -117,6 +117,7 @@ export default function App() {
   const [orders, setOrders] = useState([]);
 
   const [toast, setToast] = useState({ visible: false, message: '' });
+  const [zoomedImg, setZoomedImg] = useState(null);
 
   const showToast = (message) => {
     setToast({ visible: true, message });
@@ -206,6 +207,16 @@ export default function App() {
 
       <MascotToast visible={toast.visible} message={toast.message} />
 
+      {/* MODAL PARA ZOOM DE FOTOS */}
+      {zoomedImg && (
+        <div className="fixed inset-0 bg-black/90 z-[500] flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => setZoomedImg(null)}>
+          <button className="absolute top-6 right-6 text-white p-3 rounded-full bg-white/10 hover:bg-white/20 active:scale-90 transition-all" onClick={() => setZoomedImg(null)}>
+            <X size={32} />
+          </button>
+          <img src={zoomedImg} alt="Zoom" className="max-w-full max-h-full object-contain rounded-2xl shadow-2xl animate-in zoom-in duration-200" />
+        </div>
+      )}
+
       <header className="h-16 shrink-0 bg-[#FFE4E6]/95 backdrop-blur-sm border-b border-[#FECDD3] px-4 flex justify-between items-center shadow-sm relative z-30">
         <div 
           className="flex items-center gap-2 cursor-pointer active:scale-95 transition-transform" 
@@ -223,7 +234,7 @@ export default function App() {
               orders={orders} saveOrder={saveOrder} deleteOrder={deleteOrder}
               clients={clients} inventory={inventory}
               formatMoney={formatMoney} calcTotal={calcTotal}
-              showToast={showToast}
+              showToast={showToast} onImageClick={setZoomedImg}
             />
           )}
           {activeTab === 'clients' && <ClientsView clients={clients} saveClient={saveClient} deleteClient={deleteClient} showToast={showToast} />}
@@ -231,7 +242,7 @@ export default function App() {
             <InventoryView 
               inventory={inventory} saveInventory={saveInventory} deleteInventory={deleteInventory}
               formatMoney={formatMoney}
-              showToast={showToast}
+              showToast={showToast} onImageClick={setZoomedImg}
             />
           )}
         </div>
@@ -254,7 +265,7 @@ const NavBtn = ({ icon, label, active, onClick }) => (
 );
 
 // --- VISTA DE PEDIDOS ---
-function OrdersView({ orders, saveOrder, deleteOrder, clients, inventory, formatMoney, calcTotal, showToast }) {
+function OrdersView({ orders, saveOrder, deleteOrder, clients, inventory, formatMoney, calcTotal, showToast, onImageClick }) {
   const [search, setSearch] = useState('');
   const [selectedOrder, setSelectedOrder] = useState(null);
   const [isEditingOrder, setIsEditingOrder] = useState(false);
@@ -372,6 +383,7 @@ function OrdersView({ orders, saveOrder, deleteOrder, clients, inventory, format
           onEdit={() => setIsEditingOrder(selectedOrder)}
           onDelete={() => setOrderToDelete(selectedOrder)}
           showToast={showToast}
+          onImageClick={onImageClick}
         />
       )}
 
@@ -412,7 +424,7 @@ function OrdersView({ orders, saveOrder, deleteOrder, clients, inventory, format
 }
 
 // --- MODAL DETALLE DE PEDIDO ---
-function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, onDeleteAbono, formatMoney, calcTotal, onEdit, onDelete, showToast }) {
+function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, onDeleteAbono, formatMoney, calcTotal, onEdit, onDelete, showToast, onImageClick }) {
   const { total, paid, pending } = calcTotal(order);
   const isSaldado = pending <= 0;
   const [abonoAmount, setAbonoAmount] = useState('');
@@ -449,7 +461,7 @@ function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, 
       });
     }
     if (order.abonos && order.abonos.length > 0) {
-      msg += `\n💝 *Abonos extra:*\n`;
+      msg += `\n💝 *Abonos:*\n`;
       order.abonos.forEach(a => msg += `- ${formatMoney(a.amount)}\n`);
     }
 
@@ -493,7 +505,12 @@ function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, 
             {(order.items || []).map(item => (
               <div key={item.id} className="bg-white p-4 rounded-3xl shadow-sm border border-[#FBCFE8] flex items-center gap-3">
                 {item.image ? (
-                  <img src={item.image} alt="prod" className="w-16 h-16 object-cover rounded-2xl shadow-sm" />
+                  <img 
+                    src={item.image} 
+                    alt="prod" 
+                    onClick={() => onImageClick(item.image)}
+                    className="w-16 h-16 object-cover rounded-2xl shadow-sm cursor-pointer hover:opacity-80 transition-opacity" 
+                  />
                 ) : (
                   <div className="w-16 h-16 bg-[#FFF1F2] rounded-2xl flex items-center justify-center"><Camera size={24} className="text-[#FDA4AF]"/></div>
                 )}
@@ -522,7 +539,7 @@ function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, 
           </div>
 
           <div className="space-y-3 pt-6 mt-6 border-t-2 border-dashed border-[#FBCFE8]">
-            <h4 className="font-black text-[#9F1239]">Abonos (Pagos extra)</h4>
+            <h4 className="font-black text-[#9F1239]">Abonos</h4>
             {order.abonos && order.abonos.map(abono => (
               <div key={abono.id} className="flex justify-between items-center bg-white p-4 rounded-3xl border border-[#A7F3D0] shadow-sm">
                 <p className="font-bold text-[#059669] flex items-center gap-2"><Check size={16}/> Abono</p>
@@ -823,11 +840,17 @@ function ClientsView({ clients, saveClient, deleteClient, showToast }) {
 }
 
 // --- VISTA INVENTARIO ---
-function InventoryView({ inventory, saveInventory, deleteInventory, formatMoney, showToast }) {
+function InventoryView({ inventory, saveInventory, deleteInventory, formatMoney, showToast, onImageClick }) {
   const [form, setForm] = useState({ id: null, desc: '', size: '', price: '', category: 'shein', image: null });
+  const [search, setSearch] = useState('');
   const [invToDelete, setInvToDelete] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
   const fileInputRef = useRef(null);
+
+  const filteredInventory = inventory.filter(item => 
+    item.desc.toLowerCase().includes(search.toLowerCase()) || 
+    (item.category && item.category.toLowerCase().includes(search.toLowerCase()))
+  );
 
   const handleImage = async (e) => {
     if (e.target.files && e.target.files[0]) {
@@ -857,6 +880,17 @@ function InventoryView({ inventory, saveInventory, deleteInventory, formatMoney,
 
   return (
     <div className="space-y-6">
+      
+      {/* Buscador de Inventario */}
+      <div className="relative">
+        <Search className="absolute left-4 top-4 text-[#FB7185]" size={20} />
+        <input 
+          type="text" placeholder="Buscar en inventario..." 
+          value={search} onChange={(e) => setSearch(e.target.value)}
+          className="w-full pl-12 pr-4 py-4 rounded-3xl border-2 border-transparent bg-white shadow-sm focus:border-[#FBCFE8] focus:ring-4 focus:ring-[#FBCFE8]/50 outline-none transition-all text-[#831843] font-medium placeholder-[#FB7185]"
+        />
+      </div>
+
       <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-[#FBCFE8] space-y-5">
         <h3 className="font-black text-xl text-[#9F1239] flex items-center gap-2">
           <Flower2 size={20} className="text-[#F472B6]"/> 
@@ -875,29 +909,34 @@ function InventoryView({ inventory, saveInventory, deleteInventory, formatMoney,
           <input type="file" accept="image/*" ref={fileInputRef} onChange={handleImage} className="hidden" />
           
           <div className="flex-1 space-y-3">
-            <input type="text" placeholder="Descripción" value={form.desc} onChange={e => setForm({...form, desc: e.target.value})} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
-            <input type="text" placeholder="Detalle" value={form.size} onChange={e => setForm({...form, size: e.target.value})} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
+            <input type="text" placeholder="¿Que producto es?" value={form.desc} onChange={e => setForm({...form, desc: e.target.value})} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
+            <input type="text" placeholder="Detalle/Talla" value={form.size} onChange={e => setForm({...form, size: e.target.value})} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
             <div className="flex bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden transition-colors">
                <span className="bg-[#FFE4E6] px-4 py-4 border-r-2 border-[#FECDD3] font-black text-[#BE123C]">Q</span>
-               <input type="number" placeholder="Costo" value={form.price} onChange={e => setForm({...form, price: e.target.value})} className="w-full p-4 outline-none bg-transparent font-black text-[#831843] placeholder-[#FB7185]" />
+               <input type="number" placeholder="Precio" value={form.price} onChange={e => setForm({...form, price: e.target.value})} className="w-full p-4 outline-none bg-transparent font-black text-[#831843] placeholder-[#FB7185]" />
             </div>
           </div>
         </div>
         
         <div className="flex gap-3 pt-2">
            <button onClick={handleSave} disabled={isSaving} className={`flex-1 text-white py-4 rounded-2xl font-black shadow-md transition-all ${isSaving ? 'bg-gray-400 scale-95' : 'bg-[#F472B6] active:scale-95'}`}>
-             {isSaving ? '...' : 'Guardar Producto'}
+             {isSaving ? '...' : 'Guardar Inversión'}
            </button>
            {form.id && <button onClick={() => setForm({id:null, desc:'', size:'', price:'', category: form.category, image:null})} className="px-6 bg-[#FFF1F2] text-[#E11D48] rounded-2xl font-black transition-colors hover:bg-[#FFE4E6]">Cancelar</button>}
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        {inventory.map(item => (
+        {filteredInventory.map(item => (
           <div key={item.id} className="bg-white p-4 rounded-[2rem] shadow-sm border border-[#FBCFE8] flex flex-col relative">
-            {item.category && <div className="absolute top-6 right-6 scale-90 origin-top-right z-10">{getCategoryBadge(item.category)}</div>}
+            {item.category && <div className="absolute top-6 right-6 scale-90 origin-top-right z-10 pointer-events-none">{getCategoryBadge(item.category)}</div>}
             {item.image ? (
-               <img src={item.image} alt={item.desc} className="w-full h-36 object-cover rounded-[1.5rem] mb-3 shadow-inner" />
+               <img 
+                 src={item.image} 
+                 alt={item.desc} 
+                 onClick={() => onImageClick(item.image)}
+                 className="w-full h-36 object-cover rounded-[1.5rem] mb-3 shadow-inner cursor-pointer hover:opacity-90 transition-opacity" 
+               />
             ) : (
                <div className="w-full h-36 bg-[#FFF0F5] rounded-[1.5rem] mb-3 flex items-center justify-center"><Camera className="text-[#FDA4AF]" size={32}/></div>
             )}
@@ -905,17 +944,23 @@ function InventoryView({ inventory, saveInventory, deleteInventory, formatMoney,
             {item.size && <p className="text-xs text-[#FB7185] font-bold my-1">{item.size}</p>}
             <p className="font-black text-[#E11D48] text-lg mb-3 mt-1">Q {item.price}</p>
             <div className="flex gap-2 mt-auto">
-              <button onClick={() => setForm(item)} className="flex-1 p-3 bg-[#FBCFE8] text-[#9F1239] rounded-2xl active:scale-95 flex justify-center transition-transform"><Edit2 size={18}/></button>
+              <button onClick={() => { setForm(item); window.scrollTo({top: 0, behavior: 'smooth'}); }} className="flex-1 p-3 bg-[#FBCFE8] text-[#9F1239] rounded-2xl active:scale-95 flex justify-center transition-transform"><Edit2 size={18}/></button>
               <button onClick={() => setInvToDelete(item)} className="flex-1 p-3 bg-[#FFF1F2] text-[#E11D48] border border-[#FECDD3] rounded-2xl active:scale-95 flex justify-center transition-transform"><Trash2 size={18}/></button>
             </div>
           </div>
         ))}
       </div>
       
-      {inventory.length === 0 && (
+      {inventory.length === 0 && !search && (
           <div className="text-center py-10 opacity-70 cursor-pointer" onClick={() => showToast("¡Aquí verás lo que compres para vender!")}>
             <MascotRose size={80} className="mb-4 mx-auto hover:scale-110 transition-transform" />
             <p className="font-bold text-[#BE123C]">Tu inventario está vacío.</p>
+          </div>
+      )}
+
+      {inventory.length > 0 && filteredInventory.length === 0 && search && (
+          <div className="text-center py-10 opacity-70">
+            <p className="font-bold text-[#BE123C]">No se encontraron prendas.</p>
           </div>
       )}
 
