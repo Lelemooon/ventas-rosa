@@ -1,50 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Plus, Trash2, Edit2, Search, Share2, Settings, Check, X, ChevronRight, Flower2, Heart } from 'lucide-react';
-
-// --- HOOKS DE ALMACENAMIENTO ---
-function useLocalStorage(key, initialValue) {
-  const [storedValue, setStoredValue] = useState(() => {
-    try {
-      const item = window.localStorage.getItem(key);
-      if (item) {
-        const parsed = JSON.parse(item);
-        if (key === 'shein_inventory' || key === 'shein_orders') {
-          return migrateData(key, parsed);
-        }
-        return parsed;
-      }
-      return initialValue;
-    } catch (error) {
-      console.error(error);
-      return initialValue;
-    }
-  });
-
-  useEffect(() => {
-    window.localStorage.setItem(key, JSON.stringify(storedValue));
-  }, [key, storedValue]);
-
-  return [storedValue, setStoredValue];
-}
-
-function migrateData(key, data) {
-  if (!Array.isArray(data)) return data;
-  if (key === 'shein_inventory') {
-    return data.map(item => ({ ...item, currency: item.currency || 'GTQ' }));
-  }
-  if (key === 'shein_orders') {
-    return data.map(order => ({
-      ...order,
-      abonos: order.abonos || [],
-      items: (order.items || []).map(item => ({
-        ...item,
-        currency: item.currency || 'GTQ',
-        qty: item.qty || 1
-      }))
-    }));
-  }
-  return data;
-}
+import { Camera, Plus, Trash2, Edit2, Search, Share2, Check, X, ChevronRight, Flower2, Heart, Tag } from 'lucide-react';
+import { collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { db } from './firebase'; 
 
 const compressImage = (file) => {
   return new Promise((resolve) => {
@@ -91,7 +48,7 @@ const MascotToast = ({ visible, message }) => (
   </div>
 );
 
-// NUEVO: Modal de Confirmación seguro para iOS
+// Modal de Confirmación seguro para iOS
 function ConfirmModal({ isOpen, title, message, onConfirm, onCancel }) {
   if (!isOpen) return null;
   return (
@@ -111,15 +68,53 @@ function ConfirmModal({ isOpen, title, message, onConfirm, onCancel }) {
   );
 }
 
+// Selector visual de Categoría (Catálogo)
+const CategorySelector = ({ selected, onChange }) => {
+  const categories = [
+    { id: 'shein', label: 'SHEIN', color: 'bg-[#F472B6]', textColor: 'text-white' },
+    { id: 'esika', label: 'Ésika', color: 'bg-[#F59E0B]', textColor: 'text-white' },
+    { id: 'lbel', label: 'L\'BEL', color: 'bg-[#6366F1]', textColor: 'text-white' },
+    { id: 'otro', label: 'Otro', color: 'bg-[#9CA3AF]', textColor: 'text-white' }
+  ];
+
+  return (
+    <div className="flex gap-2 overflow-x-auto pb-2 snap-x">
+      {categories.map(cat => (
+        <button
+          key={cat.id}
+          onClick={(e) => { e.preventDefault(); onChange(cat.id); }}
+          className={`snap-start shrink-0 px-4 py-2 rounded-2xl font-black text-sm transition-all shadow-sm ${
+            selected === cat.id 
+              ? `${cat.color} ${cat.textColor} ring-2 ring-offset-2 ring-[#FBCFE8] scale-105` 
+              : 'bg-[#FFF0F5] text-[#FB7185] border-2 border-transparent hover:border-[#FBCFE8]'
+          }`}
+        >
+          {cat.label}
+        </button>
+      ))}
+    </div>
+  );
+};
+
+const getCategoryBadge = (catId) => {
+  const badges = {
+    shein: { label: 'SHEIN', class: 'bg-[#FDF2F8] text-[#DB2777] border-[#FBCFE8]' },
+    esika: { label: 'Ésika', class: 'bg-[#FFFBEB] text-[#D97706] border-[#FDE68A]' },
+    lbel: { label: 'L\'BEL', class: 'bg-[#EEF2FF] text-[#4F46E5] border-[#C7D2FE]' },
+    otro: { label: 'Otro', class: 'bg-[#F3F4F6] text-[#4B5563] border-[#E5E7EB]' }
+  };
+  const b = badges[catId] || badges.otro;
+  return <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${b.class}`}>{b.label}</span>;
+};
+
 // --- COMPONENTE PRINCIPAL ---
 export default function App() {
   const [activeTab, setActiveTab] = useState('orders');
-  const [activeCurrency, setActiveCurrency] = useLocalStorage('shein_active_currency', 'GTQ');
-  const [exchangeRate, setExchangeRate] = useLocalStorage('shein_exchange_rate', 0.38);
   
-  const [inventory, setInventory] = useLocalStorage('shein_inventory', []);
-  const [clients, setClients] = useLocalStorage('shein_clients', []);
-  const [orders, setOrders] = useLocalStorage('shein_orders', []);
+  // Estados Reales desde Firebase
+  const [inventory, setInventory] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [orders, setOrders] = useState([]);
 
   const [toast, setToast] = useState({ visible: false, message: '' });
 
@@ -128,33 +123,67 @@ export default function App() {
     setTimeout(() => setToast(t => ({ ...t, visible: false })), 3000);
   };
 
-  const convertAmount = (amount, fromCurrency, toCurrency) => {
-    if (fromCurrency === toCurrency) return amount;
-    const numAmount = parseFloat(amount) || 0;
-    if (fromCurrency === 'MXN' && toCurrency === 'GTQ') return numAmount * exchangeRate;
-    if (fromCurrency === 'GTQ' && toCurrency === 'MXN') return numAmount / exchangeRate;
-    return numAmount;
-  };
+  // EFECTO DE SINCRONIZACIÓN FIREBASE
+  useEffect(() => {
+    // Migración Automática inicial
+    const migrateLocalToFirebase = async () => {
+      const migrated = localStorage.getItem('shein_migrated_firebase_q');
+      if (!migrated) {
+        try {
+          const localInv = JSON.parse(localStorage.getItem('shein_inventory') || '[]');
+          const localCli = JSON.parse(localStorage.getItem('shein_clients') || '[]');
+          const localOrd = JSON.parse(localStorage.getItem('shein_orders') || '[]');
 
-  const formatMoney = (amount, currency = activeCurrency) => {
-    const numAmount = parseFloat(amount) || 0;
-    const symbol = currency === 'GTQ' ? 'Q' : '$';
-    const suffix = currency === 'MXN' ? ' MXN' : '';
-    return `${symbol} ${numAmount.toFixed(2)}${suffix}`;
-  };
+          for (const item of localInv) await setDoc(doc(db, 'shein_inventory', item.id), item);
+          for (const item of localCli) await setDoc(doc(db, 'shein_clients', item.id), item);
+          for (const item of localOrd) await setDoc(doc(db, 'shein_orders', item.id), item);
+          
+          localStorage.setItem('shein_migrated_firebase_q', 'true');
+        } catch(e) { console.error("Error migrando:", e); }
+      }
+    };
+    migrateLocalToFirebase();
+
+    // Suscripciones en tiempo real
+    const unsubInv = onSnapshot(collection(db, 'shein_inventory'), (snapshot) => {
+      setInventory(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })));
+    });
+    
+    const unsubCli = onSnapshot(collection(db, 'shein_clients'), (snapshot) => {
+      setClients(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })));
+    });
+    
+    const unsubOrd = onSnapshot(collection(db, 'shein_orders'), (snapshot) => {
+      setOrders(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })));
+    });
+
+    return () => { unsubInv(); unsubCli(); unsubOrd(); };
+  }, []);
+
+  // CONTROLADORES CRUD DE FIREBASE
+  const saveOrder = (order) => setDoc(doc(db, 'shein_orders', order.id), order);
+  const deleteOrder = (id) => deleteDoc(doc(db, 'shein_orders', id));
+  
+  const saveClient = (client) => setDoc(doc(db, 'shein_clients', client.id), client);
+  const deleteClient = (id) => deleteDoc(doc(db, 'shein_clients', id));
+  
+  const saveInventory = (item) => setDoc(doc(db, 'shein_inventory', item.id), item);
+  const deleteInventory = (id) => deleteDoc(doc(db, 'shein_inventory', id));
+
+  // FUNCIONES FINANCIERAS (Solo Quetzales)
+  const formatMoney = (amount) => `Q ${parseFloat(amount || 0).toFixed(2)}`;
 
   const calcTotal = (order) => {
     let total = 0;
     let paid = 0;
     (order.items || []).forEach(item => {
-      const qty = item.qty || 1;
-      const convertedPrice = convertAmount(item.price, item.currency, activeCurrency) * qty;
-      total += convertedPrice;
-      if (item.status === 'paid') paid += convertedPrice;
+      const itemTotal = parseFloat(item.price) * (item.qty || 1);
+      total += itemTotal;
+      if (item.status === 'paid') paid += itemTotal;
     });
     
     (order.abonos || []).forEach(abono => {
-      paid += convertAmount(abono.amount, abono.currency, activeCurrency);
+      paid += parseFloat(abono.amount);
     });
 
     total = Math.round(total * 100) / 100;
@@ -163,7 +192,7 @@ export default function App() {
   };
 
   const motivationalPhrases = [
-    "¡Tú puedes! 🌸",
+    "¡Tú puedes, Rosa! 🌸",
     "¡Qué bonitas prendas! 👗",
     "¡A vender mucho hoy! 💖",
     "¡Eres la mejor! ✨",
@@ -183,21 +212,7 @@ export default function App() {
           onClick={() => showToast(motivationalPhrases[Math.floor(Math.random() * motivationalPhrases.length)])}
         >
           <MascotRose size={34} className="hover:rotate-12 transition-transform" />
-          <h1 className="text-xl font-black text-[#9F1239] tracking-tight">Ventas</h1>
-        </div>
-        <div className="flex bg-white/60 rounded-full p-1 border border-[#FECDD3] shadow-sm backdrop-blur-sm">
-          <button 
-            onClick={() => setActiveCurrency('MXN')}
-            className={`px-3 py-1 rounded-full text-sm font-bold transition-all ${activeCurrency === 'MXN' ? 'bg-[#FDA4AF] text-white shadow-sm' : 'text-[#FB7185] hover:bg-white'}`}
-          >
-            MXN
-          </button>
-          <button 
-            onClick={() => setActiveCurrency('GTQ')}
-            className={`px-3 py-1 rounded-full text-sm font-bold transition-all ${activeCurrency === 'GTQ' ? 'bg-[#86EFAC] text-[#065F46] shadow-sm' : 'text-[#FB7185] hover:bg-white'}`}
-          >
-            GTQ
-          </button>
+          <h1 className="text-xl font-black text-[#9F1239] tracking-tight">Ventas de Rosa</h1>
         </div>
       </header>
 
@@ -205,21 +220,20 @@ export default function App() {
         <div className="p-4 max-w-2xl mx-auto pb-28">
           {activeTab === 'orders' && (
             <OrdersView 
-              orders={orders} setOrders={setOrders} 
+              orders={orders} saveOrder={saveOrder} deleteOrder={deleteOrder}
               clients={clients} inventory={inventory}
-              formatMoney={formatMoney} calcTotal={calcTotal} activeCurrency={activeCurrency}
+              formatMoney={formatMoney} calcTotal={calcTotal}
               showToast={showToast}
             />
           )}
-          {activeTab === 'clients' && <ClientsView clients={clients} setClients={setClients} showToast={showToast} />}
+          {activeTab === 'clients' && <ClientsView clients={clients} saveClient={saveClient} deleteClient={deleteClient} showToast={showToast} />}
           {activeTab === 'inventory' && (
             <InventoryView 
-              inventory={inventory} setInventory={setInventory} 
-              formatMoney={formatMoney} convertAmount={convertAmount} activeCurrency={activeCurrency}
+              inventory={inventory} saveInventory={saveInventory} deleteInventory={deleteInventory}
+              formatMoney={formatMoney}
               showToast={showToast}
             />
           )}
-          {activeTab === 'settings' && <SettingsView exchangeRate={exchangeRate} setExchangeRate={setExchangeRate} showToast={showToast} />}
         </div>
       </main>
 
@@ -227,45 +241,40 @@ export default function App() {
         <NavBtn icon={<ChevronRight />} label="Pedidos" active={activeTab === 'orders'} onClick={() => setActiveTab('orders')} />
         <NavBtn icon={<Search />} label="Clientas" active={activeTab === 'clients'} onClick={() => setActiveTab('clients')} />
         <NavBtn icon={<Plus />} label="Inversión" active={activeTab === 'inventory'} onClick={() => setActiveTab('inventory')} />
-        <NavBtn icon={<Settings />} label="Ajustes" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
       </nav>
     </div>
   );
 }
 
 const NavBtn = ({ icon, label, active, onClick }) => (
-  <button onClick={onClick} className={`flex flex-col items-center p-2 rounded-2xl transition-all duration-300 w-16 ${active ? 'text-[#BE123C] bg-[#FFE4E6] scale-110 shadow-sm' : 'text-[#FDA4AF] hover:bg-[#FFF0F5]'}`}>
+  <button onClick={onClick} className={`flex flex-col items-center p-2 rounded-2xl transition-all duration-300 w-20 ${active ? 'text-[#BE123C] bg-[#FFE4E6] scale-110 shadow-sm' : 'text-[#FDA4AF] hover:bg-[#FFF0F5]'}`}>
     {React.cloneElement(icon, { size: 24, strokeWidth: active ? 2.5 : 2 })}
-    <span className="text-[10px] mt-1 font-bold">{label}</span>
+    <span className="text-[11px] mt-1 font-bold">{label}</span>
   </button>
 );
 
 // --- VISTA DE PEDIDOS ---
-function OrdersView({ orders, setOrders, clients, inventory, formatMoney, calcTotal, activeCurrency, showToast }) {
+function OrdersView({ orders, saveOrder, deleteOrder, clients, inventory, formatMoney, calcTotal, showToast }) {
   const [search, setSearch] = useState('');
   const [selectedOrder, setSelectedOrder] = useState(null);
   const [isEditingOrder, setIsEditingOrder] = useState(false);
-  
   const [orderToDelete, setOrderToDelete] = useState(null);
 
-  const filteredClients = clients.filter(c => c.name.toLowerCase().includes(search.toLowerCase()));
+  const filteredClients = clients
+    .filter(c => c.name.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   const handleUpdateItemStatus = (orderId, itemId, newStatus) => {
     let orderToUpdate = orders.find(o => o.id === orderId);
     let updatedItems = (orderToUpdate.items || []).map(i => i.id === itemId ? { ...i, status: newStatus } : i);
+    const updatedOrder = { ...orderToUpdate, items: updatedItems };
     
-    setOrders(orders.map(o => {
-      if (o.id !== orderId) return o;
-      return { ...o, items: updatedItems };
-    }));
-    
-    if (selectedOrder && selectedOrder.id === orderId) {
-      setSelectedOrder(prev => ({ ...prev, items: updatedItems }));
-    }
+    saveOrder(updatedOrder);
+    if (selectedOrder && selectedOrder.id === orderId) setSelectedOrder(updatedOrder);
 
     if (newStatus === 'paid') {
       const isAllPaidNow = updatedItems.every(i => i.status === 'paid');
-      const hasPending = calcTotal({...orderToUpdate, items: updatedItems}).pending;
+      const hasPending = calcTotal(updatedOrder).pending;
       if (isAllPaidNow || hasPending <= 0) {
          showToast("¡Cuenta saldada! 💸");
       } else {
@@ -275,20 +284,18 @@ function OrdersView({ orders, setOrders, clients, inventory, formatMoney, calcTo
   };
 
   const handleAddAbono = (orderId, abono) => {
-    const updated = orders.map(o => o.id === orderId ? { ...o, abonos: [...(o.abonos || []), abono] } : o);
-    setOrders(updated);
-    if (selectedOrder && selectedOrder.id === orderId) {
-      setSelectedOrder(updated.find(o => o.id === orderId));
-    }
+    let order = orders.find(o => o.id === orderId);
+    const updatedOrder = { ...order, abonos: [...(order.abonos || []), abono] };
+    saveOrder(updatedOrder);
+    if (selectedOrder && selectedOrder.id === orderId) setSelectedOrder(updatedOrder);
     showToast("¡Abono registrado! 💰");
   };
 
   const handleDeleteAbono = (orderId, abonoId) => {
-    const updated = orders.map(o => o.id === orderId ? { ...o, abonos: (o.abonos || []).filter(a => a.id !== abonoId) } : o);
-    setOrders(updated);
-    if (selectedOrder && selectedOrder.id === orderId) {
-      setSelectedOrder(updated.find(o => o.id === orderId));
-    }
+    let order = orders.find(o => o.id === orderId);
+    const updatedOrder = { ...order, abonos: (order.abonos || []).filter(a => a.id !== abonoId) };
+    saveOrder(updatedOrder);
+    if (selectedOrder && selectedOrder.id === orderId) setSelectedOrder(updatedOrder);
   };
 
   return (
@@ -310,8 +317,8 @@ function OrdersView({ orders, setOrders, clients, inventory, formatMoney, calcTo
       </button>
 
       {orders.length === 0 && !search && (
-        <div className="flex flex-col items-center justify-center py-12 opacity-80">
-          <MascotRose size={110} className="mb-4" />
+        <div className="flex flex-col items-center justify-center py-12 opacity-80" onClick={() => showToast("¡A vender se ha dicho!")}>
+          <MascotRose size={110} className="mb-4 animate-pulse cursor-pointer" />
           <p className="font-black text-[#BE123C] text-xl text-center">¡Todo listo para empezar!</p>
           <p className="text-[#FB7185] text-sm text-center mt-1 font-bold">Crea tu primer pedido arriba 👆</p>
         </div>
@@ -335,7 +342,7 @@ function OrdersView({ orders, setOrders, clients, inventory, formatMoney, calcTo
                   <div 
                     key={order.id} 
                     onClick={() => setSelectedOrder(order)}
-                    className={`p-4 rounded-3xl cursor-pointer transition-all active:scale-95 border-2 flex flex-col justify-between ${isPaid ? 'bg-[#ECFDF5] border-[#A7F3D0]' : 'bg-[#FFF1F2] border-[#FECDD3]'}`}
+                    className={`p-4 rounded-3xl cursor-pointer transition-all active:scale-95 border-2 flex flex-col justify-between ${isPaid ? 'bg-[#ECFDF5] border-[#A7F3D0] hover:bg-[#D1FAE5]' : 'bg-[#FFF1F2] border-[#FECDD3] hover:bg-[#FFE4E6]'}`}
                   >
                     <div>
                       <p className="text-xs text-[#9F1239]/60 mb-1 font-bold">{order.date}</p>
@@ -362,10 +369,9 @@ function OrdersView({ orders, setOrders, clients, inventory, formatMoney, calcTo
           onDeleteAbono={handleDeleteAbono}
           formatMoney={formatMoney}
           calcTotal={calcTotal}
-          activeCurrency={activeCurrency}
-          showToast={showToast}
           onEdit={() => setIsEditingOrder(selectedOrder)}
           onDelete={() => setOrderToDelete(selectedOrder)}
+          showToast={showToast}
         />
       )}
 
@@ -374,19 +380,17 @@ function OrdersView({ orders, setOrders, clients, inventory, formatMoney, calcTo
           order={typeof isEditingOrder === 'object' ? isEditingOrder : null}
           clients={clients} inventory={inventory}
           onClose={() => setIsEditingOrder(false)}
-          onSave={(newOrder) => {
+          onSave={async (newOrder) => {
+            newOrder.abonos = newOrder.abonos || (typeof isEditingOrder === 'object' ? isEditingOrder.abonos : []);
+            await saveOrder(newOrder);
             if(typeof isEditingOrder === 'object') {
-              newOrder.abonos = newOrder.abonos || (typeof isEditingOrder === 'object' ? isEditingOrder.abonos : []);
-              setOrders(orders.map(o => o.id === newOrder.id ? newOrder : o));
               setSelectedOrder(newOrder);
               showToast("¡Pedido actualizado! ✏️");
             } else {
-              setOrders([...orders, newOrder]);
               showToast("¡Pedido guardado! 🎉");
             }
             setIsEditingOrder(false);
           }}
-          activeCurrency={activeCurrency}
           showToast={showToast}
         />
       )}
@@ -396,8 +400,8 @@ function OrdersView({ orders, setOrders, clients, inventory, formatMoney, calcTo
         title="¿Eliminar pedido?"
         message="Se borrará toda la cuenta y los abonos de este pedido de forma permanente."
         onCancel={() => setOrderToDelete(null)}
-        onConfirm={() => {
-          setOrders(orders.filter(o => o.id !== orderToDelete.id));
+        onConfirm={async () => {
+          await deleteOrder(orderToDelete.id);
           setOrderToDelete(null);
           setSelectedOrder(null);
           showToast("Pedido eliminado 🗑️");
@@ -408,18 +412,19 @@ function OrdersView({ orders, setOrders, clients, inventory, formatMoney, calcTo
 }
 
 // --- MODAL DETALLE DE PEDIDO ---
-function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, onDeleteAbono, formatMoney, calcTotal, activeCurrency, onEdit, onDelete, showToast }) {
+function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, onDeleteAbono, formatMoney, calcTotal, onEdit, onDelete, showToast }) {
   const { total, paid, pending } = calcTotal(order);
   const isSaldado = pending <= 0;
-
   const [abonoAmount, setAbonoAmount] = useState('');
-  const [abonoCurrency, setAbonoCurrency] = useState(activeCurrency);
+  const [isAddingAbono, setIsAddingAbono] = useState(false);
 
   const handleAddAbonoClick = () => {
     const amt = parseFloat(abonoAmount);
     if (!amt || amt <= 0) return;
-    onAddAbono(order.id, { id: generateId(), amount: amt, currency: abonoCurrency, date: new Date().toLocaleDateString() });
+    setIsAddingAbono(true);
+    onAddAbono(order.id, { id: generateId(), amount: amt, date: new Date().toLocaleDateString() });
     setAbonoAmount('');
+    setTimeout(() => setIsAddingAbono(false), 500);
   };
 
   const generateMessage = () => {
@@ -431,23 +436,24 @@ function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, 
       msg += `🛍️ *Pendiente:*\n`;
       pendingItems.forEach(i => {
         const sizeText = i.size ? ` (${i.size})` : '';
-        msg += `- ${i.qty > 1 ? i.qty + 'x ' : ''}${i.desc}${sizeText}: ${formatMoney(i.price * (i.qty || 1), i.currency)}\n`;
+        const catText = (i.category && i.category !== 'shein') ? ` [${i.category.toUpperCase()}]` : '';
+        msg += `- ${i.qty > 1 ? i.qty + 'x ' : ''}${i.desc}${sizeText}${catText}: ${formatMoney(i.price * (i.qty || 1))}\n`;
       });
     }
     if (paidItems.length > 0) {
       msg += `\n✅ *Pagado:*\n`;
       paidItems.forEach(i => {
         const sizeText = i.size ? ` (${i.size})` : '';
-        msg += `- ${i.qty > 1 ? i.qty + 'x ' : ''}${i.desc}${sizeText}: ${formatMoney(i.price * (i.qty || 1), i.currency)}\n`;
+        const catText = (i.category && i.category !== 'shein') ? ` [${i.category.toUpperCase()}]` : '';
+        msg += `- ${i.qty > 1 ? i.qty + 'x ' : ''}${i.desc}${sizeText}${catText}: ${formatMoney(i.price * (i.qty || 1))}\n`;
       });
     }
-
     if (order.abonos && order.abonos.length > 0) {
-      msg += `\n💝 *Abonos:*\n`;
-      order.abonos.forEach(a => msg += `- ${formatMoney(a.amount, a.currency)}\n`);
+      msg += `\n💝 *Abonos extra:*\n`;
+      order.abonos.forEach(a => msg += `- ${formatMoney(a.amount)}\n`);
     }
 
-    msg += `\n--- Resumen en ${activeCurrency} ---\n`;
+    msg += `\n--- Resumen ---\n`;
     msg += `Total: ${formatMoney(total)}\n`;
     msg += `Abonado: ${formatMoney(paid)}\n`;
     msg += `*Saldo Pendiente: ${formatMoney(pending)}*`;
@@ -461,13 +467,8 @@ function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, 
 
   return (
     <div className="fixed inset-0 bg-[#831843]/40 backdrop-blur-sm z-[100] flex flex-col">
-      {/* ESPACIO SUPERIOR PARA HACER CLICK Y CERRAR */}
       <div className="flex-1" onClick={onClose}></div>
-      
-      {/* CONTENEDOR MODAL */}
       <div className="bg-[#FFF0F5] w-full h-[90vh] rounded-t-[2.5rem] flex flex-col shadow-2xl border-t border-[#FBCFE8]">
-        
-        {/* Cabecera Fija */}
         <div className="p-6 border-b border-[#FBCFE8] flex justify-between items-center bg-white shrink-0 rounded-t-[2.5rem]">
           <div>
             <h3 className="text-2xl font-black text-[#9F1239] flex items-center gap-2">
@@ -476,10 +477,9 @@ function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, 
             </h3>
             <p className="text-sm text-[#FB7185] font-bold mt-1">{order.date}</p>
           </div>
-          <button onClick={onClose} className="p-2 bg-[#FFF1F2] text-[#E11D48] rounded-full active:scale-90"><X size={24} strokeWidth={3}/></button>
+          <button onClick={onClose} className="p-2 bg-[#FFF1F2] text-[#E11D48] rounded-full active:scale-90 hover:bg-[#FFE4E6] transition-colors"><X size={24} strokeWidth={3}/></button>
         </div>
         
-        {/* Contenido Scrolleable */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4 w-full max-w-2xl mx-auto">
           <div className={`p-6 rounded-[2rem] text-center shadow-inner relative overflow-hidden ${isSaldado ? 'bg-gradient-to-br from-[#D1FAE5] to-[#A7F3D0] text-[#065F46]' : 'bg-gradient-to-br from-[#FFE4E6] to-[#FECDD3] text-[#BE123C]'}`}>
             <p className="text-sm font-black uppercase tracking-widest opacity-80">{isSaldado ? 'Cuenta Saldada' : 'Saldo Pendiente'}</p>
@@ -489,7 +489,7 @@ function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, 
           </div>
 
           <div className="space-y-3">
-            <h4 className="font-black text-[#9F1239] flex items-center gap-2"><Heart size={18}/> Prendas del pedido</h4>
+            <h4 className="font-black text-[#9F1239] flex items-center gap-2"><Heart size={18}/> Productos del pedido</h4>
             {(order.items || []).map(item => (
               <div key={item.id} className="bg-white p-4 rounded-3xl shadow-sm border border-[#FBCFE8] flex items-center gap-3">
                 {item.image ? (
@@ -498,19 +498,22 @@ function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, 
                   <div className="w-16 h-16 bg-[#FFF1F2] rounded-2xl flex items-center justify-center"><Camera size={24} className="text-[#FDA4AF]"/></div>
                 )}
                 <div className="flex-1">
-                  <p className="font-bold text-[#831843] leading-tight">
-                    {item.qty > 1 && <span className="text-[#F472B6] mr-1">{item.qty}x</span>}
-                    {item.desc}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-1 mb-1">
+                    <p className="font-bold text-[#831843] leading-tight">
+                      {item.qty > 1 && <span className="text-[#F472B6] mr-1">{item.qty}x</span>}
+                      {item.desc}
+                    </p>
+                    {item.category && getCategoryBadge(item.category)}
+                  </div>
                   {item.size && <p className="text-xs text-[#FB7185] font-bold mt-0.5">{item.size}</p>}
                   <p className="text-sm font-black text-[#E11D48] mt-1">
-                    {formatMoney(item.price * (item.qty || 1), item.currency)}
-                    {item.qty > 1 && <span className="text-[10px] text-[#FDA4AF] font-bold ml-1">({formatMoney(item.price, item.currency)} c/u)</span>}
+                    {formatMoney(item.price * (item.qty || 1))}
+                    {item.qty > 1 && <span className="text-[10px] text-[#FDA4AF] font-bold ml-1">({formatMoney(item.price)} c/u)</span>}
                   </p>
                 </div>
                 <button 
                   onClick={() => onUpdateStatus(order.id, item.id, item.status === 'paid' ? 'pending' : 'paid')}
-                  className={`w-14 h-14 rounded-full flex items-center justify-center shadow-md shrink-0 ${item.status === 'paid' ? 'bg-[#34D399] text-white' : 'bg-[#FFF1F2] text-[#FDA4AF] border-2 border-[#FECDD3]'}`}
+                  className={`w-14 h-14 rounded-full flex items-center justify-center shadow-md shrink-0 transition-colors ${item.status === 'paid' ? 'bg-[#34D399] text-white' : 'bg-[#FFF1F2] text-[#FDA4AF] border-2 border-[#FECDD3]'}`}
                 >
                   <Check size={28} strokeWidth={4} />
                 </button>
@@ -520,30 +523,27 @@ function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, 
 
           <div className="space-y-3 pt-6 mt-6 border-t-2 border-dashed border-[#FBCFE8]">
             <h4 className="font-black text-[#9F1239]">Abonos (Pagos extra)</h4>
-            
             {order.abonos && order.abonos.map(abono => (
               <div key={abono.id} className="flex justify-between items-center bg-white p-4 rounded-3xl border border-[#A7F3D0] shadow-sm">
                 <p className="font-bold text-[#059669] flex items-center gap-2"><Check size={16}/> Abono</p>
                 <div className="flex items-center gap-3">
-                  <p className="font-black text-[#059669] text-lg">{formatMoney(abono.amount, abono.currency)}</p>
-                  <button onClick={() => onDeleteAbono(order.id, abono.id)} className="p-2 text-[#E11D48] bg-[#FFF1F2] rounded-full active:scale-90"><Trash2 size={18}/></button>
+                  <p className="font-black text-[#059669] text-lg">{formatMoney(abono.amount)}</p>
+                  <button onClick={() => onDeleteAbono(order.id, abono.id)} className="p-2 text-[#E11D48] bg-[#FFF1F2] rounded-full active:scale-90 hover:bg-[#FFE4E6] transition-colors"><Trash2 size={18}/></button>
                 </div>
               </div>
             ))}
             
-            <div className="flex gap-2 bg-white p-2 rounded-3xl border-2 border-[#FBCFE8] focus-within:border-[#F472B6] shadow-sm items-center">
-              <select value={abonoCurrency} onChange={e => setAbonoCurrency(e.target.value)} className="bg-[#FFF1F2] p-3 rounded-2xl text-sm font-black text-[#BE123C] outline-none">
-                <option value="GTQ">Q</option>
-                <option value="MXN">$</option>
-              </select>
-              <input type="number" placeholder="Monto abonado" value={abonoAmount} onChange={e => setAbonoAmount(e.target.value)} className="flex-1 px-3 outline-none w-full bg-transparent font-black text-[#831843] placeholder-[#FDA4AF]" />
-              <button onClick={handleAddAbonoClick} className="bg-[#34D399] text-white px-5 py-3 rounded-2xl font-black active:scale-95 shadow-md">Agregar</button>
+            <div className="flex gap-2 bg-white p-2 rounded-3xl border-2 border-[#FBCFE8] focus-within:border-[#F472B6] shadow-sm items-center transition-colors">
+              <span className="pl-4 font-black text-[#BE123C]">Q</span>
+              <input type="number" placeholder="Monto abonado" value={abonoAmount} onChange={e => setAbonoAmount(e.target.value)} className="flex-1 px-3 py-3 outline-none w-full bg-transparent font-black text-[#831843] placeholder-[#FDA4AF]" />
+              <button onClick={handleAddAbonoClick} disabled={isAddingAbono} className={`px-5 py-3 rounded-2xl font-black shadow-md transition-all ${isAddingAbono ? 'bg-gray-300 text-gray-500 scale-95' : 'bg-[#34D399] text-white active:scale-95'}`}>
+                {isAddingAbono ? '...' : 'Agregar'}
+              </button>
             </div>
           </div>
         </div>
 
-        {/* Footer Fijo */}
-        <div className="p-4 bg-white border-t border-[#FBCFE8] shrink-0 pb-8 z-20 shadow-[0_-4px_15px_-3px_rgba(251,113,133,0.1)]">
+        <div className="p-4 bg-white border-t border-[#FBCFE8] shrink-0 pb-10 z-20 shadow-[0_-4px_15px_-3px_rgba(251,113,133,0.1)]">
           <div className="max-w-2xl mx-auto grid grid-cols-2 gap-3">
             <button onClick={shareWhatsApp} className="col-span-2 flex items-center justify-center gap-2 bg-[#10B981] text-white p-4 rounded-3xl font-black active:scale-95 shadow-md">
               <Share2 size={24} /> Compartir por WhatsApp
@@ -562,21 +562,27 @@ function OrderDetailModal({ order, client, onClose, onUpdateStatus, onAddAbono, 
 }
 
 // --- MODAL FORMULARIO DE PEDIDO ---
-function OrderFormModal({ order, clients, inventory, onClose, onSave, activeCurrency, showToast }) {
-  const [clientId, setClientId] = useState(order ? order.clientId : (clients[0]?.id || ''));
+function OrderFormModal({ order, clients, inventory, onClose, onSave, showToast }) {
+  const [clientId, setClientId] = useState(order ? order.clientId : '');
   const [date, setDate] = useState(order ? order.date : new Date().toISOString().split('T')[0]);
   const [items, setItems] = useState(order ? order.items : []);
-  
-  const [newItem, setNewItem] = useState({ desc: '', size: '', price: '', currency: activeCurrency, image: null, status: 'pending', qty: 1 });
+  const [newItem, setNewItem] = useState({ desc: '', size: '', price: '', category: 'shein', image: null, status: 'pending', qty: 1 });
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Clientes ordenados alfabéticamente
+  const sortedClients = [...clients].sort((a, b) => a.name.localeCompare(b.name));
 
   const handleAddItemManual = () => {
-    if (!newItem.desc || !newItem.price) return alert('Descripción y precio obligatorios');
+    if (!newItem.desc || !newItem.price) {
+      showToast("🌸 Te faltó la descripción o el precio");
+      return;
+    }
     
     const existingIndex = items.findIndex(i => 
       i.desc.trim().toLowerCase() === newItem.desc.trim().toLowerCase() && 
       (i.size || '').trim().toLowerCase() === (newItem.size || '').trim().toLowerCase() &&
       i.price === parseFloat(newItem.price) &&
-      i.currency === newItem.currency
+      i.category === newItem.category
     );
 
     if (existingIndex >= 0) {
@@ -587,8 +593,8 @@ function OrderFormModal({ order, clients, inventory, onClose, onSave, activeCurr
       setItems([...items, { ...newItem, id: generateId(), price: parseFloat(newItem.price) }]);
     }
     
-    showToast("¡Prenda sumada a la cuenta! 🛍️");
-    setNewItem({ desc: '', size: '', price: '', currency: activeCurrency, image: null, status: 'pending', qty: 1 });
+    showToast(`¡Agregado de ${newItem.category.toUpperCase()}! 🛍️`);
+    setNewItem({ desc: '', size: '', price: '', category: newItem.category, image: null, status: 'pending', qty: 1 });
   };
 
   const handleAddFromInventory = (invItem) => {
@@ -596,7 +602,7 @@ function OrderFormModal({ order, clients, inventory, onClose, onSave, activeCurr
       desc: invItem.desc,
       size: invItem.size || '',
       price: invItem.price.toString(),
-      currency: invItem.currency,
+      category: invItem.category || 'shein',
       image: invItem.image,
       status: 'pending',
       qty: 1
@@ -605,22 +611,28 @@ function OrderFormModal({ order, clients, inventory, onClose, onSave, activeCurr
 
   const updateItemQty = (id, delta) => {
     setItems(items.map(i => {
-      if (i.id === id) {
-        return { ...i, qty: Math.max(1, (i.qty || 1) + delta) };
-      }
+      if (i.id === id) return { ...i, qty: Math.max(1, (i.qty || 1) + delta) };
       return i;
     }));
   };
 
-  const handleSave = () => {
-    if (!clientId) return alert('Selecciona un cliente');
-    if (items.length === 0) return alert('Agrega al menos un producto');
-    onSave({ id: order ? order.id : generateId(), clientId, date, items, abonos: order ? order.abonos : [] });
+  const handleSave = async () => {
+    if (!clientId) {
+      showToast("🌸 Selecciona una clienta primero");
+      return;
+    }
+    if (items.length === 0) {
+      showToast("🌸 Agrega al menos un producto a la cuenta");
+      return;
+    }
+    
+    setIsSaving(true);
+    await onSave({ id: order ? order.id : generateId(), clientId, date, items });
+    // setIsSaving se queda true si onSave cierra el modal, para evitar doble toque.
   };
 
   return (
     <div className="fixed inset-0 bg-[#FFF0F5] z-[100] flex flex-col">
-      {/* Cabecera Fija */}
       <div className="p-4 flex items-center justify-between border-b border-[#FBCFE8] bg-white/95 backdrop-blur-md shadow-sm shrink-0 z-20">
         <div className="max-w-2xl mx-auto w-full flex justify-between items-center">
           <h2 className="text-2xl font-black text-[#9F1239] flex items-center gap-2">
@@ -631,32 +643,35 @@ function OrderFormModal({ order, clients, inventory, onClose, onSave, activeCurr
         </div>
       </div>
       
-      {/* Zona de Scroll Exclusiva */}
       <div className="flex-1 overflow-y-auto w-full bg-[#FFF0F5]">
         <div className="p-4 space-y-6 max-w-2xl mx-auto pb-8 pt-4">
+          
           <div className="space-y-3 bg-white p-5 rounded-[2rem] shadow-sm border border-[#FBCFE8]">
             <label className="block font-black text-[#9F1239]">Clienta</label>
-            <select value={clientId} onChange={e => setClientId(e.target.value)} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-[#FECDD3] focus:border-[#F472B6] outline-none font-bold text-[#831843]">
-              <option value="">Seleccionar...</option>
-              {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            <select value={clientId} onChange={e => setClientId(e.target.value)} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-[#FECDD3] focus:border-[#F472B6] outline-none font-bold text-[#831843] transition-colors">
+              <option value="">Seleccionar clienta...</option>
+              {sortedClients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
             <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-[#FECDD3] outline-none font-bold text-[#831843]" />
           </div>
 
           <div className="bg-white border-2 border-[#FBCFE8] p-5 rounded-[2rem] space-y-4 shadow-sm">
-            <h4 className="font-black text-[#9F1239] flex items-center gap-2"><Heart size={18}/> Prenda a agregar</h4>
+            <h4 className="font-black text-[#9F1239] flex items-center gap-2"><Heart size={18}/> Producto a agregar</h4>
+            
+            <CategorySelector 
+              selected={newItem.category} 
+              onChange={(catId) => setNewItem({...newItem, category: catId})} 
+            />
+
             <div className="grid grid-cols-4 gap-3">
-              <input type="text" placeholder="¿Qué prenda es?" value={newItem.desc} onChange={e => setNewItem({...newItem, desc: e.target.value})} className="col-span-4 p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185]" />
-              <input type="text" placeholder="Detalle/Talla" value={newItem.size} onChange={e => setNewItem({...newItem, size: e.target.value})} className="col-span-2 p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185]" />
-              <div className="col-span-2 flex items-center bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden">
+              <input type="text" placeholder="¿Qué producto es?" value={newItem.desc} onChange={e => setNewItem({...newItem, desc: e.target.value})} className="col-span-4 p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
+              <input type="text" placeholder="Detalle/Talla" value={newItem.size} onChange={e => setNewItem({...newItem, size: e.target.value})} className="col-span-2 p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
+              <div className="col-span-2 flex items-center bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden transition-colors">
                  <span className="pl-4 text-[#FB7185] font-black">Cant:</span>
                  <input type="number" min="1" value={newItem.qty || ''} onChange={e => setNewItem({...newItem, qty: parseInt(e.target.value) || 1})} className="w-full p-4 outline-none text-center bg-transparent font-black text-[#831843]" />
               </div>
-              <div className="col-span-4 flex bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden">
-                 <select value={newItem.currency} onChange={e => setNewItem({...newItem, currency: e.target.value})} className="bg-[#FFE4E6] pl-4 pr-2 border-r-2 border-[#FECDD3] text-sm outline-none font-black text-[#BE123C]">
-                   <option value="GTQ">Q</option>
-                   <option value="MXN">$</option>
-                 </select>
+              <div className="col-span-4 flex bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden transition-colors">
+                 <span className="bg-[#FFE4E6] pl-4 pr-3 py-4 border-r-2 border-[#FECDD3] font-black text-[#BE123C]">Q</span>
                  <input type="number" placeholder="Precio Unitario" value={newItem.price} onChange={e => setNewItem({...newItem, price: e.target.value})} className="w-full p-4 outline-none bg-transparent font-black text-[#831843] placeholder-[#FB7185]" />
               </div>
             </div>
@@ -667,13 +682,14 @@ function OrderFormModal({ order, clients, inventory, onClose, onSave, activeCurr
 
           {inventory.length > 0 && (
             <div>
-              <h4 className="font-black text-[#9F1239] mb-3 ml-2">🌸 Toca una prenda de tu inventario:</h4>
+              <h4 className="font-black text-[#9F1239] mb-3 ml-2 flex items-center gap-2"><Tag size={18}/> De tu inventario:</h4>
               <div className="flex gap-4 overflow-x-auto pb-4 snap-x px-2">
                 {inventory.map(inv => (
-                  <div key={inv.id} onClick={() => handleAddFromInventory(inv)} className="snap-start shrink-0 w-32 bg-white rounded-3xl border border-[#FBCFE8] p-3 flex flex-col items-center cursor-pointer active:scale-95 shadow-sm">
+                  <div key={inv.id} onClick={() => handleAddFromInventory(inv)} className="snap-start shrink-0 w-32 bg-white rounded-3xl border border-[#FBCFE8] p-3 flex flex-col items-center cursor-pointer active:scale-95 shadow-sm hover:border-[#F472B6] transition-colors relative">
+                     {inv.category && <div className="absolute top-2 right-2 scale-75 origin-top-right">{getCategoryBadge(inv.category)}</div>}
                      {inv.image ? <img src={inv.image} className="w-full h-24 object-cover rounded-2xl mb-2 shadow-inner"/> : <div className="w-full h-24 bg-[#FFF1F2] rounded-2xl mb-2 flex items-center justify-center"><Camera className="text-[#FDA4AF]"/></div>}
                      <p className="text-xs font-black truncate w-full text-center text-[#831843]">{inv.desc}</p>
-                     <p className="text-xs text-[#E11D48] font-bold mt-1">{inv.currency} {inv.price}</p>
+                     <p className="text-xs text-[#E11D48] font-bold mt-1">Q {inv.price}</p>
                   </div>
                 ))}
               </div>
@@ -681,30 +697,31 @@ function OrderFormModal({ order, clients, inventory, onClose, onSave, activeCurr
           )}
 
           <div>
-            <h4 className="font-black text-[#9F1239] mb-3 ml-2">Prendas en esta cuenta ({items.length})</h4>
+            <h4 className="font-black text-[#9F1239] mb-3 ml-2">Productos en esta cuenta ({items.length})</h4>
             <div className="space-y-3">
               {items.map(item => (
                 <div key={item.id} className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white p-4 rounded-[2rem] border border-[#FBCFE8] shadow-sm gap-3">
                   <div className="flex-1 pr-2">
-                    <p className="font-black text-[#831843] leading-tight">
-                      {item.desc} 
-                      {item.size && <span className="text-[#FB7185] font-bold text-sm ml-1">({item.size})</span>}
-                    </p>
-                    <p className="text-sm font-bold text-[#E11D48] mt-1">{item.currency} {item.price} c/u</p>
+                    <div className="flex flex-wrap items-center gap-1 mb-1">
+                      <p className="font-black text-[#831843] leading-tight">{item.desc}</p>
+                      {item.category && getCategoryBadge(item.category)}
+                    </div>
+                    {item.size && <p className="text-[#FB7185] font-bold text-sm">{item.size}</p>}
+                    <p className="text-sm font-bold text-[#E11D48] mt-1">Q {item.price} c/u</p>
                   </div>
                   <div className="flex items-center justify-between w-full sm:w-auto gap-4">
                     <div className="flex items-center bg-[#FFF1F2] rounded-2xl border border-[#FECDD3]">
-                      <button onClick={() => updateItemQty(item.id, -1)} className="px-4 py-2 font-black text-[#BE123C] active:bg-[#FFE4E6] rounded-l-2xl">-</button>
+                      <button onClick={() => updateItemQty(item.id, -1)} className="px-4 py-2 font-black text-[#BE123C] active:bg-[#FFE4E6] rounded-l-2xl transition-colors">-</button>
                       <span className="font-black text-sm w-6 text-center text-[#831843]">{item.qty || 1}</span>
-                      <button onClick={() => updateItemQty(item.id, 1)} className="px-4 py-2 font-black text-[#BE123C] active:bg-[#FFE4E6] rounded-r-2xl">+</button>
+                      <button onClick={() => updateItemQty(item.id, 1)} className="px-4 py-2 font-black text-[#BE123C] active:bg-[#FFE4E6] rounded-r-2xl transition-colors">+</button>
                     </div>
-                    <button onClick={() => setItems(items.filter(i => i.id !== item.id))} className="p-3 text-[#E11D48] bg-[#FFF1F2] rounded-2xl"><Trash2 size={20}/></button>
+                    <button onClick={() => setItems(items.filter(i => i.id !== item.id))} className="p-3 text-[#E11D48] bg-[#FFF1F2] rounded-2xl hover:bg-[#FFE4E6] transition-colors"><Trash2 size={20}/></button>
                   </div>
                 </div>
               ))}
               {items.length === 0 && (
                  <div className="text-center p-6 border-2 border-dashed border-[#FBCFE8] rounded-[2rem]">
-                   <p className="font-bold text-[#FB7185]">Aún no has agregado prendas.</p>
+                   <p className="font-bold text-[#FB7185]">Aún no has agregado productos.</p>
                  </div>
               )}
             </div>
@@ -712,11 +729,14 @@ function OrderFormModal({ order, clients, inventory, onClose, onSave, activeCurr
         </div>
       </div>
 
-      {/* Pie Fijo con padding extra para evitar la barra del iPhone */}
-      <div className="p-4 bg-white border-t border-[#FBCFE8] shrink-0 pb-8 z-20 shadow-[0_-4px_15px_-3px_rgba(251,113,133,0.1)]">
+      <div className="p-4 bg-white border-t border-[#FBCFE8] shrink-0 pb-10 z-20 shadow-[0_-4px_15px_-3px_rgba(251,113,133,0.1)]">
         <div className="max-w-2xl mx-auto w-full">
-          <button onClick={handleSave} className="w-full py-5 rounded-[2rem] bg-gradient-to-r from-[#10B981] to-[#34D399] text-white font-black text-xl active:scale-95 shadow-lg shadow-[#34D399]/30">
-            Guardar Pedido Completo
+          <button 
+            onClick={handleSave} 
+            disabled={isSaving}
+            className={`w-full py-5 rounded-[2rem] text-white font-black text-xl shadow-lg transition-all ${isSaving ? 'bg-gray-400 scale-95 shadow-none' : 'bg-gradient-to-r from-[#10B981] to-[#34D399] active:scale-95 shadow-[#34D399]/30'}`}
+          >
+            {isSaving ? 'Guardando...' : 'Guardar Pedido Completo'}
           </button>
         </div>
       </div>
@@ -725,20 +745,28 @@ function OrderFormModal({ order, clients, inventory, onClose, onSave, activeCurr
 }
 
 // --- VISTA CLIENTES ---
-function ClientsView({ clients, setClients, showToast }) {
+function ClientsView({ clients, saveClient, deleteClient, showToast }) {
   const [form, setForm] = useState({ id: null, name: '', phone: '' });
   const [clientToDelete, setClientToDelete] = useState(null);
+  const [isSaving, setIsSaving] = useState(false);
 
-  const handleSave = () => {
-    if (!form.name) return alert('El nombre es obligatorio');
+  const sortedClients = [...clients].sort((a, b) => a.name.localeCompare(b.name));
+
+  const handleSave = async () => {
+    if (!form.name) {
+      showToast("🌸 El nombre es obligatorio");
+      return;
+    }
+    setIsSaving(true);
     if (form.id) {
-      setClients(clients.map(c => c.id === form.id ? form : c));
+      await saveClient(form);
       showToast("¡Clienta actualizada! ✏️");
     } else {
-      setClients([...clients, { ...form, id: generateId() }]);
+      await saveClient({ ...form, id: generateId() });
       showToast("¡Clienta guardada! 💖");
     }
     setForm({ id: null, name: '', phone: '' });
+    setIsSaving(false);
   };
 
   return (
@@ -748,24 +776,26 @@ function ClientsView({ clients, setClients, showToast }) {
           <Heart size={20} className="text-[#F472B6]"/> 
           {form.id ? 'Editar Clienta' : 'Nueva Clienta'}
         </h3>
-        <input type="text" placeholder="Nombre completo" value={form.name} onChange={e => setForm({...form, name: e.target.value})} className="w-full p-4 mb-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185]" />
-        <input type="tel" placeholder="Teléfono (Opcional)" value={form.phone} onChange={e => setForm({...form, phone: e.target.value})} className="w-full p-4 mb-5 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185]" />
+        <input type="text" placeholder="Nombre completo" value={form.name} onChange={e => setForm({...form, name: e.target.value})} className="w-full p-4 mb-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
+        <input type="tel" placeholder="Teléfono (Opcional)" value={form.phone} onChange={e => setForm({...form, phone: e.target.value})} className="w-full p-4 mb-5 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
         <div className="flex gap-3">
-           <button onClick={handleSave} className="flex-1 bg-[#F472B6] text-white py-4 rounded-2xl font-black active:scale-95 shadow-md">Guardar</button>
-           {form.id && <button onClick={() => setForm({id:null, name:'', phone:''})} className="px-6 bg-[#FFF1F2] text-[#E11D48] rounded-2xl font-black">Cancelar</button>}
+           <button onClick={handleSave} disabled={isSaving} className={`flex-1 text-white py-4 rounded-2xl font-black shadow-md transition-all ${isSaving ? 'bg-gray-400 scale-95' : 'bg-[#F472B6] active:scale-95'}`}>
+             {isSaving ? '...' : 'Guardar'}
+           </button>
+           {form.id && <button onClick={() => setForm({id:null, name:'', phone:''})} className="px-6 bg-[#FFF1F2] text-[#E11D48] rounded-2xl font-black transition-colors hover:bg-[#FFE4E6]">Cancelar</button>}
         </div>
       </div>
 
       <div className="space-y-3">
-        {clients.map(c => (
+        {sortedClients.map(c => (
           <div key={c.id} className="bg-white p-5 rounded-[2rem] shadow-sm border border-[#FBCFE8] flex justify-between items-center">
             <div>
               <p className="font-black text-lg text-[#831843]">{c.name}</p>
               {c.phone && <p className="text-[#FB7185] text-sm mt-0.5 font-bold">{c.phone}</p>}
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setForm(c)} className="p-3 bg-[#FBCFE8] text-[#9F1239] rounded-2xl active:scale-90"><Edit2 size={20}/></button>
-              <button onClick={() => setClientToDelete(c)} className="p-3 bg-[#FFF1F2] text-[#E11D48] rounded-2xl active:scale-90 border border-[#FECDD3]"><Trash2 size={20}/></button>
+              <button onClick={() => setForm(c)} className="p-3 bg-[#FBCFE8] text-[#9F1239] rounded-2xl active:scale-90 transition-transform"><Edit2 size={20}/></button>
+              <button onClick={() => setClientToDelete(c)} className="p-3 bg-[#FFF1F2] text-[#E11D48] rounded-2xl active:scale-90 border border-[#FECDD3] transition-transform"><Trash2 size={20}/></button>
             </div>
           </div>
         ))}
@@ -782,8 +812,8 @@ function ClientsView({ clients, setClients, showToast }) {
         title="¿Eliminar clienta?"
         message="Esta clienta se borrará de tu libreta de contactos."
         onCancel={() => setClientToDelete(null)}
-        onConfirm={() => {
-          setClients(clients.filter(x => x.id !== clientToDelete.id));
+        onConfirm={async () => {
+          await deleteClient(clientToDelete.id);
           setClientToDelete(null);
           showToast("Clienta eliminada 🗑️");
         }}
@@ -793,29 +823,36 @@ function ClientsView({ clients, setClients, showToast }) {
 }
 
 // --- VISTA INVENTARIO ---
-function InventoryView({ inventory, setInventory, formatMoney, activeCurrency, showToast }) {
-  const [form, setForm] = useState({ id: null, desc: '', size: '', price: '', currency: activeCurrency, image: null });
+function InventoryView({ inventory, saveInventory, deleteInventory, formatMoney, showToast }) {
+  const [form, setForm] = useState({ id: null, desc: '', size: '', price: '', category: 'shein', image: null });
   const [invToDelete, setInvToDelete] = useState(null);
+  const [isSaving, setIsSaving] = useState(false);
   const fileInputRef = useRef(null);
 
   const handleImage = async (e) => {
     if (e.target.files && e.target.files[0]) {
       const compressed = await compressImage(e.target.files[0]);
       setForm({ ...form, image: compressed });
+      showToast("¡Foto lista! 📸");
     }
   };
 
-  const handleSave = () => {
-    if (!form.desc || !form.price) return alert('Descripción y precio requeridos');
+  const handleSave = async () => {
+    if (!form.desc || !form.price) {
+      showToast("🌸 Te faltó la descripción o el precio");
+      return;
+    }
+    setIsSaving(true);
     const itemData = { ...form, price: parseFloat(form.price) };
     if (form.id) {
-      setInventory(inventory.map(i => i.id === form.id ? itemData : i));
-      showToast("¡Prenda actualizada! ✨");
+      await saveInventory(itemData);
+      showToast("¡Producto actualizado! ✨");
     } else {
-      setInventory([...inventory, { ...itemData, id: generateId() }]);
-      showToast("¡Prenda guardada en inventario! 👗");
+      await saveInventory({ ...itemData, id: generateId() });
+      showToast("¡Producto guardado en inventario! 📦");
     }
-    setForm({ id: null, desc: '', size: '', price: '', currency: activeCurrency, image: null });
+    setForm({ id: null, desc: '', size: '', price: '', category: form.category, image: null });
+    setIsSaving(false);
   };
 
   return (
@@ -823,8 +860,13 @@ function InventoryView({ inventory, setInventory, formatMoney, activeCurrency, s
       <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-[#FBCFE8] space-y-5">
         <h3 className="font-black text-xl text-[#9F1239] flex items-center gap-2">
           <Flower2 size={20} className="text-[#F472B6]"/> 
-          {form.id ? 'Editar Prenda' : 'Nueva Prenda (Inversión)'}
+          {form.id ? 'Editar Producto' : 'Nuevo Producto (Inversión)'}
         </h3>
+
+        <CategorySelector 
+          selected={form.category} 
+          onChange={(catId) => setForm({...form, category: catId})} 
+        />
         
         <div className="flex gap-4 items-start">
           <div onClick={() => fileInputRef.current.click()} className="w-28 h-28 shrink-0 bg-[#FFF0F5] rounded-3xl border-2 border-dashed border-[#FBCFE8] flex flex-col items-center justify-center cursor-pointer overflow-hidden text-[#FDA4AF] active:bg-[#FFE4E6] hover:border-[#F472B6] transition-colors">
@@ -833,14 +875,11 @@ function InventoryView({ inventory, setInventory, formatMoney, activeCurrency, s
           <input type="file" accept="image/*" ref={fileInputRef} onChange={handleImage} className="hidden" />
           
           <div className="flex-1 space-y-3">
-            <input type="text" placeholder="Descripción" value={form.desc} onChange={e => setForm({...form, desc: e.target.value})} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185]" />
+            <input type="text" placeholder="Descripción" value={form.desc} onChange={e => setForm({...form, desc: e.target.value})} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
             <div className="flex gap-2">
-              <input type="text" placeholder="Detalle" value={form.size} onChange={e => setForm({...form, size: e.target.value})} className="w-1/3 p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185]" />
-              <div className="flex flex-1 bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden">
-                 <select value={form.currency} onChange={e => setForm({...form, currency: e.target.value})} className="bg-[#FFE4E6] px-3 border-r-2 border-[#FECDD3] outline-none font-black text-[#BE123C]">
-                   <option value="GTQ">Q</option>
-                   <option value="MXN">$</option>
-                 </select>
+              <input type="text" placeholder="Detalle" value={form.size} onChange={e => setForm({...form, size: e.target.value})} className="w-1/3 p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
+              <div className="flex flex-1 bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden transition-colors">
+                 <span className="bg-[#FFE4E6] px-4 py-4 border-r-2 border-[#FECDD3] font-black text-[#BE123C]">Q</span>
                  <input type="number" placeholder="Costo" value={form.price} onChange={e => setForm({...form, price: e.target.value})} className="w-full p-4 outline-none bg-transparent font-black text-[#831843] placeholder-[#FB7185]" />
               </div>
             </div>
@@ -848,14 +887,17 @@ function InventoryView({ inventory, setInventory, formatMoney, activeCurrency, s
         </div>
         
         <div className="flex gap-3 pt-2">
-           <button onClick={handleSave} className="flex-1 bg-[#F472B6] text-white py-4 rounded-2xl font-black active:scale-95 shadow-md">Guardar Inversión</button>
-           {form.id && <button onClick={() => setForm({id:null, desc:'', size:'', price:'', currency:activeCurrency, image:null})} className="px-6 bg-[#FFF1F2] text-[#E11D48] rounded-2xl font-black">Cancelar</button>}
+           <button onClick={handleSave} disabled={isSaving} className={`flex-1 text-white py-4 rounded-2xl font-black shadow-md transition-all ${isSaving ? 'bg-gray-400 scale-95' : 'bg-[#F472B6] active:scale-95'}`}>
+             {isSaving ? '...' : 'Guardar Inversión'}
+           </button>
+           {form.id && <button onClick={() => setForm({id:null, desc:'', size:'', price:'', category: form.category, image:null})} className="px-6 bg-[#FFF1F2] text-[#E11D48] rounded-2xl font-black transition-colors hover:bg-[#FFE4E6]">Cancelar</button>}
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4">
         {inventory.map(item => (
-          <div key={item.id} className="bg-white p-4 rounded-[2rem] shadow-sm border border-[#FBCFE8] flex flex-col">
+          <div key={item.id} className="bg-white p-4 rounded-[2rem] shadow-sm border border-[#FBCFE8] flex flex-col relative">
+            {item.category && <div className="absolute top-6 right-6 scale-90 origin-top-right z-10">{getCategoryBadge(item.category)}</div>}
             {item.image ? (
                <img src={item.image} alt={item.desc} className="w-full h-36 object-cover rounded-[1.5rem] mb-3 shadow-inner" />
             ) : (
@@ -863,10 +905,10 @@ function InventoryView({ inventory, setInventory, formatMoney, activeCurrency, s
             )}
             <p className="font-black leading-tight flex-1 text-[#831843]">{item.desc}</p>
             {item.size && <p className="text-xs text-[#FB7185] font-bold my-1">{item.size}</p>}
-            <p className="font-black text-[#E11D48] text-lg mb-3 mt-1">{formatMoney(item.price, item.currency)}</p>
+            <p className="font-black text-[#E11D48] text-lg mb-3 mt-1">Q {item.price}</p>
             <div className="flex gap-2 mt-auto">
-              <button onClick={() => setForm(item)} className="flex-1 p-3 bg-[#FBCFE8] text-[#9F1239] rounded-2xl active:scale-95 flex justify-center"><Edit2 size={18}/></button>
-              <button onClick={() => setInvToDelete(item)} className="flex-1 p-3 bg-[#FFF1F2] text-[#E11D48] border border-[#FECDD3] rounded-2xl active:scale-95 flex justify-center"><Trash2 size={18}/></button>
+              <button onClick={() => setForm(item)} className="flex-1 p-3 bg-[#FBCFE8] text-[#9F1239] rounded-2xl active:scale-95 flex justify-center transition-transform"><Edit2 size={18}/></button>
+              <button onClick={() => setInvToDelete(item)} className="flex-1 p-3 bg-[#FFF1F2] text-[#E11D48] border border-[#FECDD3] rounded-2xl active:scale-95 flex justify-center transition-transform"><Trash2 size={18}/></button>
             </div>
           </div>
         ))}
@@ -881,73 +923,15 @@ function InventoryView({ inventory, setInventory, formatMoney, activeCurrency, s
 
       <ConfirmModal 
         isOpen={!!invToDelete}
-        title="¿Eliminar prenda?"
+        title="¿Eliminar producto?"
         message="Se borrará de tu inventario permanentemente."
         onCancel={() => setInvToDelete(null)}
-        onConfirm={() => {
-          setInventory(inventory.filter(i => i.id !== invToDelete.id));
+        onConfirm={async () => {
+          await deleteInventory(invToDelete.id);
           setInvToDelete(null);
-          showToast("Prenda borrada 🗑️");
+          showToast("Producto borrado 🗑️");
         }}
       />
-    </div>
-  );
-}
-
-// --- VISTA AJUSTES (TIPO DE CAMBIO) ---
-function SettingsView({ exchangeRate, setExchangeRate, showToast }) {
-  const [localRate, setLocalRate] = useState(exchangeRate);
-  const [loading, setLoading] = useState(false);
-
-  const fetchApiRate = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch("https://open.er-api.com/v6/latest/MXN");
-      const data = await res.json();
-      if (data && data.rates && data.rates.GTQ) {
-        setLocalRate(data.rates.GTQ);
-        setExchangeRate(data.rates.GTQ);
-        showToast("¡Cambio actualizado de internet! 🌐");
-      }
-    } catch (e) {
-      alert("Error al actualizar. Se mantendrá el valor guardado.");
-    }
-    setLoading(false);
-  };
-
-  return (
-    <div className="space-y-6">
-      <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-[#FBCFE8]">
-        <h3 className="font-black text-xl text-[#9F1239] mb-2 flex items-center gap-2">
-          <Settings size={20} className="text-[#F472B6]" />
-          Moneda y Cambio
-        </h3>
-        <p className="text-sm text-[#FB7185] font-bold mb-6">Ajusta el valor de conversión entre Pesos Mexicanos (MXN) y Quetzales (GTQ).</p>
-        
-        <div className="space-y-5">
-          <label className="block text-sm font-black text-[#831843]">1 Peso Mexicano (MXN) equivale a (GTQ):</label>
-          <input 
-            type="number" step="0.01" value={localRate} 
-            onChange={(e) => setLocalRate(parseFloat(e.target.value))}
-            className="w-full p-5 rounded-2xl bg-[#FFF0F5] border-2 border-transparent text-2xl font-black outline-none focus:border-[#F472B6] text-[#831843]" 
-          />
-          
-          <div className="flex gap-3">
-             <button 
-               onClick={() => { setExchangeRate(localRate); showToast("¡Ajuste guardado! ⚙️"); }} 
-               className="flex-1 bg-[#F472B6] text-white py-4 rounded-2xl font-black active:scale-95 shadow-md"
-             >
-               Guardar Manual
-             </button>
-             <button 
-               onClick={fetchApiRate} disabled={loading}
-               className="flex-1 bg-[#FBCFE8] text-[#9F1239] py-4 rounded-2xl font-black active:scale-95 disabled:opacity-50"
-             >
-               {loading ? 'Buscando...' : 'Obtener de API'}
-             </button>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
