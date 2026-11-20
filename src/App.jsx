@@ -663,14 +663,14 @@ function OrderFormModal({ order, clients, inventory, onClose, onSave, showToast 
               onChange={(catId) => setNewItem({...newItem, category: catId})} 
             />
 
-            <div className="grid grid-cols-4 gap-3">
-              <input type="text" placeholder="¿Qué producto es?" value={newItem.desc} onChange={e => setNewItem({...newItem, desc: e.target.value})} className="col-span-4 p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
-              <input type="text" placeholder="Detalle/Talla" value={newItem.size} onChange={e => setNewItem({...newItem, size: e.target.value})} className="col-span-2 p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
-              <div className="col-span-2 flex items-center bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden transition-colors">
-                 <span className="pl-4 text-[#FB7185] font-black">Cant:</span>
+            <div className="flex flex-col gap-3">
+              <input type="text" placeholder="¿Qué producto es?" value={newItem.desc} onChange={e => setNewItem({...newItem, desc: e.target.value})} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
+              <input type="text" placeholder="Detalle/Talla" value={newItem.size} onChange={e => setNewItem({...newItem, size: e.target.value})} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
+              <div className="flex items-center bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden transition-colors">
+                 <span className="pl-4 text-[#FB7185] font-black">Cantidad:</span>
                  <input type="number" min="1" value={newItem.qty || ''} onChange={e => setNewItem({...newItem, qty: parseInt(e.target.value) || 1})} className="w-full p-4 outline-none text-center bg-transparent font-black text-[#831843]" />
               </div>
-              <div className="col-span-4 flex bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden transition-colors">
+              <div className="flex bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden transition-colors">
                  <span className="bg-[#FFE4E6] pl-4 pr-3 py-4 border-r-2 border-[#FECDD3] font-black text-[#BE123C]">Q</span>
                  <input type="number" placeholder="Precio Unitario" value={newItem.price} onChange={e => setNewItem({...newItem, price: e.target.value})} className="w-full p-4 outline-none bg-transparent font-black text-[#831843] placeholder-[#FB7185]" />
               </div>
@@ -876,12 +876,10 @@ function InventoryView({ inventory, saveInventory, deleteInventory, formatMoney,
           
           <div className="flex-1 space-y-3">
             <input type="text" placeholder="Descripción" value={form.desc} onChange={e => setForm({...form, desc: e.target.value})} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
-            <div className="flex gap-2">
-              <input type="text" placeholder="Detalle" value={form.size} onChange={e => setForm({...form, size: e.target.value})} className="w-1/3 p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
-              <div className="flex flex-1 bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden transition-colors">
-                 <span className="bg-[#FFE4E6] px-4 py-4 border-r-2 border-[#FECDD3] font-black text-[#BE123C]">Q</span>
-                 <input type="number" placeholder="Costo" value={form.price} onChange={e => setForm({...form, price: e.target.value})} className="w-full p-4 outline-none bg-transparent font-black text-[#831843] placeholder-[#FB7185]" />
-              </div>
+            <input type="text" placeholder="Detalle" value={form.size} onChange={e => setForm({...form, size: e.target.value})} className="w-full p-4 rounded-2xl bg-[#FFF0F5] border-2 border-transparent focus:border-[#F472B6] outline-none font-bold text-[#831843] placeholder-[#FB7185] transition-colors" />
+            <div className="flex bg-[#FFF0F5] rounded-2xl border-2 border-transparent focus-within:border-[#F472B6] overflow-hidden transition-colors">
+               <span className="bg-[#FFE4E6] px-4 py-4 border-r-2 border-[#FECDD3] font-black text-[#BE123C]">Q</span>
+               <input type="number" placeholder="Costo" value={form.price} onChange={e => setForm({...form, price: e.target.value})} className="w-full p-4 outline-none bg-transparent font-black text-[#831843] placeholder-[#FB7185]" />
             </div>
           </div>
         </div>
