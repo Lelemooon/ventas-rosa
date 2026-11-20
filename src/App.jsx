@@ -240,7 +240,7 @@ export default function App() {
       <nav className="shrink-0 bg-white/95 backdrop-blur-md border-t border-[#FECDD3] flex justify-around p-3 pb-safe relative z-40 shadow-[0_-4px_15px_-3px_rgba(251,113,133,0.15)]">
         <NavBtn icon={<ChevronRight />} label="Pedidos" active={activeTab === 'orders'} onClick={() => setActiveTab('orders')} />
         <NavBtn icon={<Search />} label="Clientas" active={activeTab === 'clients'} onClick={() => setActiveTab('clients')} />
-        <NavBtn icon={<Plus />} label="Inversión" active={activeTab === 'inventory'} onClick={() => setActiveTab('inventory')} />
+        <NavBtn icon={<Plus />} label="Productos" active={activeTab === 'inventory'} onClick={() => setActiveTab('inventory')} />
       </nav>
     </div>
   );
@@ -860,7 +860,7 @@ function InventoryView({ inventory, saveInventory, deleteInventory, formatMoney,
       <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-[#FBCFE8] space-y-5">
         <h3 className="font-black text-xl text-[#9F1239] flex items-center gap-2">
           <Flower2 size={20} className="text-[#F472B6]"/> 
-          {form.id ? 'Editar Producto' : 'Nuevo Producto (Inversión)'}
+          {form.id ? 'Editar Producto' : 'Nuevo Producto'}
         </h3>
 
         <CategorySelector 
@@ -888,7 +888,7 @@ function InventoryView({ inventory, saveInventory, deleteInventory, formatMoney,
         
         <div className="flex gap-3 pt-2">
            <button onClick={handleSave} disabled={isSaving} className={`flex-1 text-white py-4 rounded-2xl font-black shadow-md transition-all ${isSaving ? 'bg-gray-400 scale-95' : 'bg-[#F472B6] active:scale-95'}`}>
-             {isSaving ? '...' : 'Guardar Inversión'}
+             {isSaving ? '...' : 'Guardar Producto'}
            </button>
            {form.id && <button onClick={() => setForm({id:null, desc:'', size:'', price:'', category: form.category, image:null})} className="px-6 bg-[#FFF1F2] text-[#E11D48] rounded-2xl font-black transition-colors hover:bg-[#FFE4E6]">Cancelar</button>}
         </div>
